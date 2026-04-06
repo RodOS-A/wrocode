@@ -1,0 +1,1050 @@
+================================================================================
+  WRO 2026 - MOSAIC MASTERS
+  EXPLICACION COMPLETA DEL CODIGO DEL ROBOT
+  Fuente de aprendizaje para NotebookLM
+================================================================================
+
+Este documento explica TODO el codigo del robot, archivo por archivo, linea por
+linea. Esta escrito para alguien que recien empieza a programar en C++/Arduino.
+No se asume ningun conocimiento previo mas alla de saber que un robot tiene
+motores y sensores.
+
+--------------------------------------------------------------------------------
+INDICE
+--------------------------------------------------------------------------------
+
+  1. Arquitectura general del proyecto
+  2. src/config/config.h  — El panel de control
+  3. src/pid.h            — El cerebro matematico (PID)
+  4. src/imu.h y imu.cpp  — El sentido del equilibrio (MPU6050)
+  5. src/motors.h y motors.cpp — El musculo (TB6612FNG)
+  6. src/movements.h y movements.cpp — Las maniobras
+  7. src/main.cpp         — El programa principal (patron cuadrado)
+  8. platformio.ini       — La configuracion del proyecto
+  9. Glosario de sintaxis C++
+ 10. Como ajustar el robot en campo (tuning)
+
+================================================================================
+1. ARQUITECTURA GENERAL DEL PROYECTO
+================================================================================
+
+El codigo esta dividido en MODULOS. Cada modulo es un archivo separado que
+hace UNA sola cosa. Esto se llama "separacion de responsabilidades" y es una
+buena practica de programacion.
+
+Piensalo como un equipo de trabajo:
+  - config.h    = El jefe que decide todos los numeros importantes
+  - pid.h       = El matematico que calcula correcciones
+  - imu.cpp     = El sensor que dice "estamos girando X grados"
+  - motors.cpp  = El electricista que enciende/apaga los motores
+  - movements.cpp = El piloto que combina todo para moverse
+  - main.cpp    = El director que da ordenes al piloto
+
+El flujo de informacion es:
+
+  config.h (numeros) ──→ pid.h (matematica)
+                     ──→ imu.cpp (sensor)
+                     ──→ motors.cpp (hardware)
+                              ↓
+                     movements.cpp (combina todo)
+                              ↓
+                     main.cpp (da las ordenes)
+
+Los archivos .h (headers) son como MENUS de un restaurante: listan lo que
+puedes pedir pero no explican como se cocina.
+Los archivos .cpp son la COCINA: contienen el codigo real que hace el trabajo.
+
+Por que separar .h y .cpp?
+  - El .h le dice a otros archivos "esto existe, puedes usarlo"
+  - El .cpp tiene el codigo completo
+  - Asi varios archivos pueden usar las mismas funciones sin copiar el codigo
+
+
+================================================================================
+2. src/config/config.h — EL PANEL DE CONTROL
+================================================================================
+
+PROPOSITO: Centralizar todos los numeros del proyecto en un solo lugar.
+Si quieres cambiar la velocidad, el PID, o los pines, solo tocas ESTE archivo.
+
+--------------------------------------------------------------------------------
+LINEA 1: #pragma once
+--------------------------------------------------------------------------------
+
+  Que hace: Evita que este archivo se incluya dos veces en la misma compilacion.
+
+  Por que importa: Si dos archivos diferentes incluyen config.h, sin esta
+  linea el compilador lo procesaria dos veces y daria error de "ya definido".
+  Con #pragma once, la segunda vez se ignora automaticamente.
+
+  Alternativa antigua (todavia valida):
+    #ifndef CONFIG_H
+    #define CONFIG_H
+    // ... contenido ...
+    #endif
+  #pragma once hace lo mismo pero en una sola linea.
+
+--------------------------------------------------------------------------------
+LINEAS: #define PIN_MOTOR_L_IN1  16
+        #define PIN_MOTOR_L_IN2  17
+        ...etc
+--------------------------------------------------------------------------------
+
+  Que hace: Define constantes con nombres legibles para los numeros de pin.
+
+  Sintaxis: #define NOMBRE  valor
+
+  Por que usar #define y no una variable normal?
+    - #define no ocupa memoria RAM del microcontrolador
+    - El compilador reemplaza cada NOMBRE por su valor antes de compilar
+    - Si escribes PIN_MOTOR_L_IN1 en el codigo, el compilador lo convierte
+      a 16 automaticamente
+    - Es mas facil leer "PIN_MOTOR_L_IN1" que el numero 16 en el codigo
+
+  Por que esos numeros de GPIO?
+    El ESP32 tiene "pines seguros" para usar como salida digital.
+    Pines a EVITAR:
+      - 0, 2, 5, 12, 15: son "strapping pins", el ESP32 los lee al arrancar
+        para decidir como iniciar. Usarlos puede impedir que el ESP32 arranque.
+      - 6, 7, 8, 9, 10, 11: conectados a la memoria flash interna.
+        Si los usas, el ESP32 puede corromperse.
+      - 34, 35, 36, 39: solo pueden LEER datos (input), no escribir (output).
+
+    Los pines 16, 17, 18, 19, 21, 22, 4 son completamente seguros para output.
+
+  Convencion de nombres usada:
+    PIN_  = es un numero de pin
+    MOTOR_ = pertenece al sistema de motores
+    L / R  = Left (izquierdo) / Right (derecho)
+    IN1, IN2 = pines de direccion del TB6612FNG
+    PWM  = pin de velocidad (señal PWM)
+    STBY = pin de standby (activar/desactivar el driver)
+
+--------------------------------------------------------------------------------
+LINEAS: #define PIN_I2C_SDA  25
+        #define PIN_I2C_SCL  26
+--------------------------------------------------------------------------------
+
+  I2C es un protocolo de comunicacion que usa 2 cables:
+    SDA = Serial Data  (datos)
+    SCL = Serial Clock (reloj que sincroniza la comunicacion)
+
+  Los pines I2C por defecto del ESP32 son 21 (SDA) y 22 (SCL), PERO esos
+  pines ya estan siendo usados por los motores (BIN2 y PWMB). Por eso usamos
+  pines alternativos: 25 y 26. El ESP32 puede usar casi cualquier par de pines
+  para I2C si lo especificas en el codigo.
+
+--------------------------------------------------------------------------------
+LINEAS: #define PWM_FRECUENCIA  5000
+        #define PWM_RESOLUCION  8
+        #define PWM_CANAL_L     0
+        #define PWM_CANAL_R     1
+--------------------------------------------------------------------------------
+
+  PWM (Pulse Width Modulation = Modulacion por Ancho de Pulso):
+  Es la forma en que el ESP32 controla la velocidad de los motores.
+
+  En vez de variar el voltaje (el ESP32 solo puede dar 0V o 3.3V), PWM
+  "parpadea" la señal muy rapido. Si parpadea 50% del tiempo encendido,
+  el motor recibe "el 50% de la potencia".
+
+  PWM_FRECUENCIA = 5000 Hz:
+    El parpadeo ocurre 5000 veces por segundo. Los motores no pueden seguir
+    ese parpadeo tan rapido y lo experimentan como un voltaje promedio.
+    5000 Hz es un buen valor: ni muy lento (audible, zumbido) ni muy rapido.
+
+  PWM_RESOLUCION = 8 bits:
+    8 bits = 2^8 = 256 niveles posibles (0 a 255).
+    0   = motor apagado
+    128 = motor al 50%
+    255 = motor al 100%
+
+  PWM_CANAL_L = 0, PWM_CANAL_R = 1:
+    El ESP32 tiene un sistema llamado LEDC (LED Control) que maneja PWM.
+    Tiene 16 canales independientes (0 a 15). Cada motor necesita su propio
+    canal para poder tener velocidades diferentes.
+
+--------------------------------------------------------------------------------
+LINEAS: #define VEL_AVANCE  160
+        #define VEL_GIRO    130
+        #define VEL_MINIMA   50
+--------------------------------------------------------------------------------
+
+  Estas son las velocidades base del robot en escala 0-255.
+
+  VEL_AVANCE = 160:
+    ~63% de potencia. Un buen balance entre velocidad y control para avanzar.
+    Si el robot va muy rapido y el PID no puede corregirlo, baja este numero.
+
+  VEL_GIRO = 130:
+    Un poco menos que avance. Los giros requieren mas control, menos velocidad.
+
+  VEL_MINIMA = 50:
+    Por debajo de este valor, los motores reciben tan poca corriente que no
+    pueden vencer la friccion y no giran. Este valor depende de tu motor y
+    bateria. Si los motores vibran pero no giran, sube este numero.
+
+--------------------------------------------------------------------------------
+LINEAS: #define TIEMPO_LADO_MS   2000
+        #define TIEMPO_PAUSA_MS   400
+--------------------------------------------------------------------------------
+
+  TIEMPO_LADO_MS = 2000:
+    El robot avanza 2000 milisegundos (2 segundos) por cada lado del cuadrado.
+    Para calibrar el tamaño del cuadrado:
+      - Mide cuanto avanza el robot en 1 segundo a VEL_AVANCE
+      - Multiplica por el tamaño que quieres
+      - Eso es tu TIEMPO_LADO_MS
+    Ejemplo: si avanza 20cm/s y quieres lados de 50cm → 50/20 = 2.5s = 2500ms
+
+  TIEMPO_PAUSA_MS = 400:
+    Pausa entre cada movimiento para que el robot se estabilice.
+    Sin esta pausa, el robot puede empezar a girar mientras todavia esta
+    vibrando del movimiento anterior.
+
+--------------------------------------------------------------------------------
+LINEAS: #define PID_DIR_KP   2.5f
+        #define PID_DIR_KI   0.05f
+        #define PID_DIR_KD   1.2f
+        #define PID_DIR_MAX  150.0f
+--------------------------------------------------------------------------------
+
+  Estos son los parametros del PID de DIRECCION (para ir recto).
+  La "f" al final (2.5f, 0.05f) significa "float" = numero con decimales.
+  Sin la "f", el compilador podria tratarlo como entero y perder precision.
+
+  KP = 2.5: Por cada grado de desviacion, aplica 2.5 puntos de correccion.
+  KI = 0.05: Acumulacion lenta del error historico (pequena para evitar windup).
+  KD = 1.2: Amortigua cambios rapidos (frena si se esta corrigiendo muy rapido).
+  MAX = 150: La correccion no puede ser mayor a 150 (de 255 posibles).
+
+  Para entender el tuning ver seccion 10 de este documento.
+
+--------------------------------------------------------------------------------
+LINEAS: #define PID_GIRO_KP   4.0f
+        #define PID_GIRO_KI   0.01f
+        #define PID_GIRO_KD   1.5f
+        #define PID_GIRO_MAX  float(VEL_GIRO)
+--------------------------------------------------------------------------------
+
+  PID de GIRO (para llegar exactamente a un angulo).
+
+  KP = 4.0: Mas agresivo que el de direccion porque necesita llegar al angulo.
+  KI = 0.01: Muy pequeno. El giro no suele tener offset persistente.
+  KD = 1.5: Mas alto que el de direccion para frenar antes de llegar al objetivo.
+  MAX = float(VEL_GIRO): La velocidad maxima de giro es VEL_GIRO (130).
+    float(...) convierte el numero entero VEL_GIRO a decimal para usarlo
+    como limite del PID.
+
+--------------------------------------------------------------------------------
+LINEAS: #define GIRO_TOLERANCIA  2.0f
+        #define GIRO_TIMEOUT_MS  4000
+--------------------------------------------------------------------------------
+
+  GIRO_TOLERANCIA = 2.0f:
+    El giro se considera "completado" cuando el error es menor a 2 grados.
+    No buscamos 0.0 exacto porque el sensor tiene ruido y nunca llegaria.
+
+  GIRO_TIMEOUT_MS = 4000:
+    Si en 4 segundos el robot no completo el giro, se detiene de todas formas.
+    Esto evita que el robot quede girando para siempre si el IMU falla.
+
+
+================================================================================
+3. src/pid.h — EL CEREBRO MATEMATICO (CONTROLADOR PID)
+================================================================================
+
+PROPOSITO: Una clase reutilizable que implementa el algoritmo PID.
+Se puede crear una instancia para cada tipo de movimiento que necesite control.
+
+¿QUE ES UN PID?
+
+  PID = Proporcional + Integral + Derivativo.
+
+  Es un algoritmo de CONTROL REALIMENTADO. Funciona asi:
+  1. Tienes un OBJETIVO (setpoint): por ejemplo, ir recto = 0 grados de giro
+  2. Mides la REALIDAD (medicion): el robot esta 5 grados girado a la izquierda
+  3. Calculas el ERROR: objetivo - realidad = 0 - 5 = -5 grados
+  4. El PID calcula una CORRECCION en base al error
+  5. Aplicas la correccion (aceleras un motor, frenar el otro)
+  6. Vuelves al paso 2 (bucle continuo)
+
+  Diagrama:
+    [OBJETIVO] ──→ [+]──→ [PID] ──→ [MOTORES] ──→ [ROBOT SE MUEVE]
+                   [↑error]                              |
+                   [−]←──────────[IMU mide angulo]←──────┘
+                               (retroalimentacion)
+
+--------------------------------------------------------------------------------
+LINEA 1: #pragma once
+LINEA 2: #include <Arduino.h>
+--------------------------------------------------------------------------------
+
+  #include <Arduino.h>:
+    Importa todas las funciones basicas de Arduino como millis(), constrain(),
+    y los tipos de datos uint8_t, etc.
+    Los corchetes angulares < > significan "busca en las librerias del sistema".
+    Las comillas " " significan "busca en los archivos de mi proyecto".
+
+--------------------------------------------------------------------------------
+LINEA: class ControladorPID {
+--------------------------------------------------------------------------------
+
+  "class" define una CLASE en C++.
+  Una clase es como un molde para crear objetos.
+
+  Analogia: la clase es el plano de un carro. Puedes hacer muchos carros
+  (objetos) con el mismo plano, pero cada uno tiene su propio velocimetro,
+  su propio kilometraje, etc.
+
+  En nuestro caso, la clase ControladorPID es el molde. Creamos dos objetos:
+    - pidDir (PID de direccion, para ir recto)
+    - pidGiro (PID de giro, para girar exactamente X grados)
+  Cada uno tiene sus propias ganancias y su propio estado interno.
+
+--------------------------------------------------------------------------------
+LINEA: public:
+--------------------------------------------------------------------------------
+
+  En C++, los miembros de una clase pueden ser:
+    public:   accesibles desde cualquier parte del codigo
+    private:  solo accesibles desde dentro de la misma clase
+
+  Todo lo que esta despues de "public:" puede ser usado desde afuera.
+  En este caso, hacemos todo publico para simplificar el uso de la clase.
+
+--------------------------------------------------------------------------------
+LINEAS: float kp;
+        float ki;
+        float kd;
+        float salidaMin;
+        float salidaMax;
+        float errorAnterior = 0.0f;
+        float integral      = 0.0f;
+        unsigned long tAnterior = 0;
+--------------------------------------------------------------------------------
+
+  Estas son las VARIABLES MIEMBRO de la clase. Cada instancia tiene su propia
+  copia de estas variables.
+
+  float:
+    Tipo de dato para numeros con decimales. Ocupa 4 bytes de memoria.
+    Precision de ~7 digitos significativos.
+    "float" viene de "floating point" (punto flotante).
+
+  unsigned long:
+    Numero entero SIN SIGNO (solo positivo) de 4 bytes.
+    Rango: 0 a 4,294,967,295.
+    Se usa para millis() porque el tiempo solo va hacia adelante (positivo)
+    y puede llegar a ser un numero muy grande (millones de ms).
+
+  = 0.0f, = 0:
+    Inicializacion directa en la declaracion. Es buena practica porque
+    garantiza que la variable empieza con un valor conocido, no con
+    basura de memoria.
+
+--------------------------------------------------------------------------------
+LINEAS: ControladorPID(float p, float i, float d,
+                       float minOut = -255.0f, float maxOut = 255.0f)
+            : kp(p), ki(i), kd(d), salidaMin(minOut), salidaMax(maxOut) {}
+--------------------------------------------------------------------------------
+
+  Esto es el CONSTRUCTOR de la clase. Se ejecuta automaticamente cuando
+  creas una nueva instancia.
+
+  Ejemplo de uso:
+    ControladorPID miPID(2.5f, 0.05f, 1.2f, -150.0f, 150.0f);
+    //                   kp    ki     kd    min      max
+
+  Los parametros con "= valor" son OPCIONALES (tienen valor por defecto).
+  Si no pasas minOut y maxOut, usara -255 y 255 automaticamente.
+
+  La sintaxis ": kp(p), ki(i), ..." se llama LISTA DE INICIALIZACION.
+  Es la forma correcta de inicializar variables miembro en C++.
+  Es equivalente (pero mas eficiente) a escribir dentro del constructor:
+    kp = p;
+    ki = i;
+    ...
+
+  Los {} vacios al final significan que el cuerpo del constructor esta vacio
+  (no hay codigo adicional que ejecutar, la lista de inicializacion ya hizo todo).
+
+--------------------------------------------------------------------------------
+FUNCION: float calcular(float setpoint, float medicion)
+--------------------------------------------------------------------------------
+
+  Esta es la funcion mas importante del PID. Se llama en cada iteracion del
+  bucle de control (cada ~5ms).
+
+  LINEA: unsigned long ahora = millis();
+
+    millis() devuelve cuantos milisegundos han pasado desde que el ESP32
+    encendio. Es como un reloj interno.
+
+  LINEA: float dt = (ahora - tAnterior) / 1000.0f;
+
+    dt = "delta time" = tiempo transcurrido desde la ultima llamada.
+    Se divide por 1000.0f para convertir de milisegundos a SEGUNDOS.
+    Por que segundos? Porque las formulas del PID (especialmente I y D)
+    requieren unidades consistentes con el tiempo en segundos.
+
+    Por que 1000.0f y no 1000?
+    Si divides dos enteros en C++, el resultado es entero (se trunca).
+    (1500 - 1495) / 1000 = 5 / 1000 = 0  ← INCORRECTO!
+    (1500 - 1495) / 1000.0f = 5 / 1000.0 = 0.005 ← CORRECTO!
+    La "f" fuerza division de punto flotante.
+
+  LINEA: if (dt <= 0.0f || dt > 0.5f) return 0.0f;
+
+    Descarta casos raros:
+    - dt <= 0: puede pasar en el primer ciclo (tAnterior = 0)
+    - dt > 0.5: si pasan mas de 500ms entre llamadas, algo salio mal
+      (probablemente el robot estaba parado). Un dt muy grande causaria
+      que el termino I acumule demasiado de una vez.
+    En estos casos, devuelve 0 (sin correccion).
+
+    "||" significa OR logico: si cualquiera de las dos condiciones es true,
+    ejecuta el return.
+
+  LINEA: float error = setpoint - medicion;
+
+    El ERROR es la diferencia entre lo que queremos y lo que tenemos.
+    Si queremos 0° y estamos en 5°: error = 0 - 5 = -5°
+    Si queremos 90° y estamos en 85°: error = 90 - 85 = 5°
+
+  LINEA: float termP = kp * error;
+
+    TERMINO PROPORCIONAL: proporcional al error actual.
+    Si el error es grande, la correccion es grande.
+    Si el error es pequeño, la correccion es pequeña.
+    Si el error es 0, la correccion P es 0.
+
+    Problema: solo con P, el robot puede quedar con un pequeño error residual
+    constante (porque cuando el error es muy pequeño, la correccion P tambien
+    es muy pequeña y puede no ser suficiente para mover el robot).
+
+  LINEAS: integral += error * dt;
+          integral = constrain(integral, salidaMin/ki, salidaMax/ki);
+          float termI = ki * integral;
+
+    TERMINO INTEGRAL: acumula el error a lo largo del tiempo.
+    "+=" significa "suma y guarda en la misma variable".
+
+    Si el robot tiene un pequeño desvio constante (ej: siempre va 2° a la
+    derecha), el termino P solo nunca lo corrige del todo. Pero la integral
+    va acumulando ese error pequeño hasta que la correccion I es suficiente
+    para eliminarlo.
+
+    Anti-windup (constrain de integral):
+    Si el robot esta bloqueado fisicamente y no puede corregir, el error
+    seguiria acumulandose en la integral hasta llegar a valores gigantes.
+    Cuando el robot se libere, la integral seria tan grande que lo haria
+    sobrepasar el objetivo drasticamente.
+    constrain limita la integral para que la salida I nunca supere los limites.
+
+    constrain(valor, minimo, maximo) es una funcion de Arduino que
+    garantiza que "valor" quede entre "minimo" y "maximo".
+
+  LINEAS: float termD = kd * (error - errorAnterior) / dt;
+          errorAnterior = error;
+
+    TERMINO DERIVATIVO: proporcional a la VELOCIDAD de cambio del error.
+    (error - errorAnterior) / dt = derivada numerica = velocidad del error.
+
+    Si el error esta disminuyendo rapido (el robot ya esta corrigiendo bien),
+    el termino D "frena" la correccion para evitar que se pase del objetivo.
+    Actua como un amortiguador de suspension.
+
+    Se guarda "error" en "errorAnterior" para la proxima llamada.
+
+  LINEA: return constrain(salida, salidaMin, salidaMax);
+
+    La salida final = P + I + D, limitada a los rangos definidos.
+    return devuelve el valor al codigo que llamo esta funcion.
+
+--------------------------------------------------------------------------------
+FUNCION: void resetear()
+--------------------------------------------------------------------------------
+
+  "void" significa que la funcion no devuelve ningun valor.
+
+  Limpia el estado interno del PID. SIEMPRE llama esta funcion antes de
+  iniciar un nuevo movimiento. Si no lo haces:
+  - La integral puede tener valores del movimiento anterior
+  - errorAnterior puede causar un spike en el termino D
+  - tAnterior puede estar muy desactualizado, causando un dt gigante
+
+
+================================================================================
+4. src/imu.h y imu.cpp — EL SENTIDO DEL EQUILIBRIO (MPU6050)
+================================================================================
+
+PROPOSITO: Leer el giroscopio MPU6050 y calcular el angulo de rotacion
+acumulado del robot. Sin esto, el robot no sabe si esta girando.
+
+¿QUE ES EL MPU6050?
+
+  Es un chip que contiene:
+  - Giroscopio de 3 ejes: mide VELOCIDAD ANGULAR (qué tan rapido gira)
+    en grados/segundo (o radianes/segundo).
+  - Acelerometro de 3 ejes: mide aceleracion lineal en m/s².
+
+  Para saber si el robot gira, usamos el giroscopio en el EJE Z:
+  - Eje Z = el eje vertical (como una brujula, rotacion horizontal).
+  - El robot descansando plano sobre el suelo gira en el eje Z.
+
+  El giroscopio da VELOCIDAD ANGULAR (rad/s), no angulos directamente.
+  Para obtener el angulo necesitamos INTEGRAR esa velocidad:
+    angulo = angulo_anterior + (velocidad_angular * tiempo)
+
+  Analogia: el velocimetro del carro mide velocidad (km/h).
+  Para saber cuanto recorriste, multiplicas velocidad x tiempo.
+  El giroscopio es como el velocimetro, y nosotros calculamos el "recorrido
+  angular" integrando.
+
+--------------------------------------------------------------------------------
+ARCHIVO: imu.h
+--------------------------------------------------------------------------------
+
+  LINEA: extern float angulo;
+         extern bool  imuDisponible;
+
+    "extern" significa "esta variable existe en OTRO archivo (.cpp),
+    pero la declaro aqui para que otros archivos puedan usarla".
+
+    Sin "extern", cada archivo que incluya imu.h crearia su PROPIA variable
+    "angulo", y no podrian compartir el mismo valor.
+    Con "extern", todos los archivos usan LA MISMA variable definida en imu.cpp.
+
+    Esto se llama "variable global" — existe en toda la ejecucion del programa.
+
+  LINEAS: bool initIMU();
+          void actualizarAngulo();
+          void resetearAngulo();
+
+    Son las DECLARACIONES de las funciones (el menu del restaurante).
+    El codigo real esta en imu.cpp.
+    Declarar las funciones aqui permite que otros archivos las llamen sin
+    necesitar ver el codigo de imu.cpp.
+
+--------------------------------------------------------------------------------
+ARCHIVO: imu.cpp
+--------------------------------------------------------------------------------
+
+  LINEA: static Adafruit_MPU6050 mpu;
+         static unsigned long tUltimaLectura = 0;
+
+    "static" en una variable global de un .cpp significa que esa variable
+    SOLO ES VISIBLE dentro de ese archivo. Otros archivos no pueden acceder
+    a "mpu" directamente. Esto protege el estado interno del modulo.
+
+    Adafruit_MPU6050 es una CLASE de la libreria Adafruit. Al escribir
+    "Adafruit_MPU6050 mpu;" estamos creando un objeto de esa clase llamado
+    "mpu". Este objeto sabe como comunicarse con el chip via I2C.
+
+  FUNCION: bool initIMU()
+
+    LINEA: Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+      Inicializa el protocolo I2C con los pines que definimos en config.h.
+      Wire es la libreria de Arduino para I2C.
+
+    LINEA: if (!mpu.begin()) {
+      mpu.begin() intenta comunicarse con el MPU6050 via I2C.
+      Devuelve true si lo encontro, false si no.
+      El "!" invierte el resultado: "si NO comenzo correctamente..."
+
+    LINEA: mpu.setGyroRange(MPU6050_RANGE_250_DEG);
+      Configura la sensibilidad del giroscopio.
+      250°/s significa que puede medir hasta 250 grados por segundo.
+      Suficiente para un robot de competicion. Si usaras mas, la precision
+      seria menor.
+      Opciones: 250, 500, 1000, 2000 grados/segundo.
+
+    LINEA: mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+      El giroscopio tiene ruido electrico de alta frecuencia.
+      El filtro paso-bajo elimina vibraciones por encima de 21 Hz.
+      Los movimientos reales del robot son mucho mas lentos que 21 Hz,
+      asi que el filtro no afecta los datos utiles.
+
+  FUNCION: void actualizarAngulo()
+
+    LINEA: sensors_event_t a, g, temp;
+      Declara tres variables de tipo "sensors_event_t" (tipo definido por
+      la libreria Adafruit para guardar lecturas de sensores).
+      a = aceleracion, g = giroscopio, temp = temperatura.
+
+    LINEA: mpu.getEvent(&a, &g, &temp);
+      Lee los tres sensores y guarda los resultados en las variables.
+      El "&" significa "pasame la DIRECCION de memoria de esta variable"
+      (se llama puntero o referencia). La funcion modifica las variables
+      directamente en su lugar en memoria.
+
+    LINEA: angulo += (g.gyro.z * 180.0f / PI) * dt;
+      g.gyro.z = velocidad angular en el eje Z, en RADIANES/segundo.
+      * 180.0f / PI = convierte de radianes a GRADOS (1 radian = 57.3°).
+      * dt = multiplica por el tiempo transcurrido para obtener GRADOS.
+      += suma al angulo acumulado actual.
+
+      Por que radianes? El MPU6050 da la lectura en radianes, que es el
+      sistema "natural" de matematica. La formula es: 1 radian = 180/PI grados.
+
+
+================================================================================
+5. src/motors.h y motors.cpp — EL MUSCULO (TB6612FNG)
+================================================================================
+
+PROPOSITO: Controlar los motores DC a nivel de hardware.
+Este modulo solo sabe "motor izquierdo al 160 hacia adelante". No sabe nada
+de PID ni de angulos.
+
+¿QUE ES EL TB6612FNG?
+
+  Es un DRIVER de motores (tambien llamado puente H o H-bridge).
+
+  El problema: los motores DC necesitan hasta 1A de corriente y funcionar en
+  ambas direcciones. El ESP32 solo puede dar 40mA y no puede invertir voltaje.
+
+  La solucion: el TB6612FNG es un "intermediario" que:
+  1. Recibe señales de control del ESP32 (poca corriente)
+  2. Controla la corriente de la bateria hacia los motores (mucha corriente)
+  3. Puede invertir la direccion del motor segun los pines IN1/IN2
+
+  Como funciona la tabla de verdad del TB6612FNG:
+    IN1=HIGH, IN2=LOW  → motor gira hacia ADELANTE
+    IN1=LOW,  IN2=HIGH → motor gira hacia ATRAS
+    IN1=LOW,  IN2=LOW  → motor se FRENA (cortocircuito suave)
+    IN1=HIGH, IN2=HIGH → motor COAST (gira por inercia, sin freno activo)
+    STBY=LOW           → driver DORMIDO, ningun motor funciona
+    STBY=HIGH          → driver ACTIVO, motores pueden funcionar
+
+  La velocidad se controla con PWM en el pin PWMA/PWMB.
+
+--------------------------------------------------------------------------------
+FUNCION: void motorsInit()
+--------------------------------------------------------------------------------
+
+  LINEA: pinMode(PIN_MOTOR_L_IN1, OUTPUT);
+    Le dice al ESP32 que ese pin va a ENVIAR señales (OUTPUT).
+    Si no lo configuras, el pin puede estar en modo INPUT y no funcionara.
+    En Arduino, siempre debes llamar pinMode() antes de usar un pin.
+
+  LINEAS: ledcSetup(PWM_CANAL_L, PWM_FRECUENCIA, PWM_RESOLUCION);
+          ledcAttachPin(PIN_MOTOR_L_PWM, PWM_CANAL_L);
+
+    LEDC es el modulo PWM del ESP32.
+    ledcSetup: configura el canal (frecuencia y resolucion).
+    ledcAttachPin: conecta el canal al pin fisico.
+    Hay que hacer esto en dos pasos porque un canal puede conectarse a
+    diferentes pines si es necesario.
+
+  LINEA: digitalWrite(PIN_MOTOR_STBY, HIGH);
+    Activa el driver TB6612FNG. Sin esta linea, los motores no funcionan
+    aunque todo lo demas este bien configurado.
+
+--------------------------------------------------------------------------------
+FUNCION: void motorLeft(int vel, bool adelante)
+--------------------------------------------------------------------------------
+
+  LINEA: vel = constrain(vel, 0, 255);
+    Proteccion: si alguien pasa vel=300 o vel=-10, lo limita a 0-255.
+    Esta "defensa" evita bugs extraños por valores fuera de rango.
+
+  LINEA: digitalWrite(PIN_MOTOR_L_IN1, adelante ? HIGH : LOW);
+
+    El operador "? :" se llama OPERADOR TERNARIO. Es un if-else en una linea:
+      condicion ? valor_si_true : valor_si_false
+
+    Equivale a:
+      if (adelante) {
+        digitalWrite(PIN_MOTOR_L_IN1, HIGH);
+      } else {
+        digitalWrite(PIN_MOTOR_L_IN1, LOW);
+      }
+
+    Si adelante=true:  IN1=HIGH, IN2=LOW  → motor avanza
+    Si adelante=false: IN1=LOW,  IN2=HIGH → motor retrocede
+
+  LINEA: ledcWrite(PWM_CANAL_L, vel);
+    Envia la señal PWM al canal del motor izquierdo.
+    vel=0 → motor apagado, vel=255 → motor a maxima velocidad.
+
+
+================================================================================
+6. src/movements.h y movements.cpp — LAS MANIOBRAS
+================================================================================
+
+PROPOSITO: Combinar motores + PID + IMU para crear movimientos complejos.
+Es el nivel mas alto antes del main.cpp.
+
+Las tres funciones disponibles:
+  avanzar(ms)      → avanza ms milisegundos en linea recta (con PID)
+  retroceder(ms)   → retrocede ms milisegundos (sin PID, para simplificar)
+  girar(grados)    → gira exactamente X grados (con PID)
+
+--------------------------------------------------------------------------------
+FUNCION: void avanzar(int ms)
+--------------------------------------------------------------------------------
+
+  LINEA: ControladorPID pidDir(PID_DIR_KP, PID_DIR_KI, PID_DIR_KD,
+                               -PID_DIR_MAX, PID_DIR_MAX);
+
+    Crea un objeto PID LOCAL (solo existe mientras avanzar() esta ejecutando).
+    Cada vez que se llama avanzar(), se crea un PID nuevo con estado limpio.
+    Cuando avanzar() termina, el PID se destruye automaticamente.
+    Esto es bueno porque no arrastramos estado de maniobras anteriores.
+
+  LINEA: float anguloReferencia = angulo;
+
+    MUY IMPORTANTE: guardamos el angulo AL INICIO del avance.
+    Si el robot ya giro 90° antes de avanzar, la referencia es 90°, no 0°.
+    El PID mantiene el angulo estable respecto a este valor inicial,
+    no respecto al norte absoluto.
+
+  LINEA: while (millis() - inicio < (unsigned long)ms)
+
+    "while" es un BUCLE: ejecuta el bloque {} mientras la condicion sea true.
+    millis() - inicio = cuantos ms han pasado desde que empezamos.
+    El bucle se repite hasta que ese tiempo supere "ms".
+
+    "(unsigned long)ms": conversion de tipo (cast).
+    ms es "int" (puede ser negativo), pero millis()-inicio es "unsigned long"
+    (solo positivo). Sin el cast, la comparacion podria dar resultados raros.
+
+  LINEAS: int velL = constrain((int)(VEL_AVANCE - correccion), VEL_MINIMA, 255);
+          int velR = constrain((int)(VEL_AVANCE + correccion), VEL_MINIMA, 255);
+
+    Aqui se aplica el PID a los motores como DIFERENCIAL de velocidad.
+
+    Si la correccion es POSITIVA (robot giro a la derecha, hay que corregir
+    girando a la izquierda):
+      velL = 160 - (+20) = 140  ← motor izquierdo MAS LENTO
+      velR = 160 + (+20) = 180  ← motor derecho MAS RAPIDO
+      Resultado: el robot gira a la izquierda para corregirse ✓
+
+    Si la correccion es NEGATIVA (robot giro a la izquierda):
+      velL = 160 - (-20) = 180  ← motor izquierdo MAS RAPIDO
+      velR = 160 + (-20) = 140  ← motor derecho MAS LENTO
+      Resultado: el robot gira a la derecha para corregirse ✓
+
+    constrain asegura que velL y velR nunca bajen de VEL_MINIMA (50)
+    ni suban de 255.
+
+    (int)(VEL_AVANCE - correccion): convierte el resultado float a int
+    porque ledcWrite necesita un entero.
+
+  LINEAS: static unsigned long tDebug = 0;
+          if (millis() - tDebug > 250) { ... }
+
+    "static" en una variable LOCAL significa que NO se destruye cuando la
+    funcion termina. La proxima vez que se llame avanzar(), tDebug recuerda
+    su valor anterior.
+
+    El if limita los mensajes de debug a uno cada 250ms.
+    Sin esto, el Serial se saturaria con miles de mensajes por segundo,
+    lo que enlenteceria el PID y haria ilegible el monitor serial.
+
+  LINEA: delay(5);
+    Pausa 5 milisegundos. Esto da una frecuencia de actualizacion del PID
+    de aproximadamente 200 Hz (200 veces por segundo).
+    Sin este delay, el loop correria tan rapido que dt seria casi 0 y
+    el termino D daria valores gigantes (divides por un numero muy pequeño).
+
+--------------------------------------------------------------------------------
+FUNCION: void girar(float grados)
+--------------------------------------------------------------------------------
+
+  LOGICA GENERAL:
+    1. Si no hay IMU → giro temporizado (metrodo de respaldo, menos preciso)
+    2. Si hay IMU → giro con PID
+
+  LINEA: float anguloObjetivo = angulo + grados;
+    El objetivo no es "90 grados absolutos" sino "90 grados MAS que ahora".
+    Si el robot ya estaba en 30°, el objetivo es 30 + 90 = 120°.
+    Esto permite encadenar giros: cada uno es relativo al estado actual.
+
+  LINEA: while (millis() - inicio < GIRO_TIMEOUT_MS)
+    Condicion de seguridad: si en 4 segundos no llegamos al objetivo, salimos.
+    Esto evita bucles infinitos si el IMU falla o el robot esta bloqueado.
+
+  LINEA: if (abs(error) <= GIRO_TOLERANCIA) { break; }
+    "abs()" devuelve el valor absoluto (sin signo).
+    Si el error (en grados) es menor a 2°, consideramos el giro completado.
+    "break" sale del while inmediatamente.
+
+  LINEA: int vel = constrain((int)abs(velGiro), VEL_MINIMA, VEL_GIRO);
+    La salida del PID tiene signo (+ = izquierda, - = derecha).
+    Tomamos el VALOR ABSOLUTO para la velocidad, y usamos el SIGNO para
+    decidir la direccion.
+
+  LINEAS: if (velGiro > 0) {
+            motorLeft(vel, false);  // izq: atras
+            motorRight(vel, true);  // der: adelante
+          } else {
+            motorLeft(vel, true);   // izq: adelante
+            motorRight(vel, false); // der: atras
+          }
+
+    Girar en el lugar (pivot turn):
+    Para girar a la IZQUIERDA:
+      Motor izquierdo va ATRAS
+      Motor derecho va ADELANTE
+      El robot gira sobre su propio centro.
+
+    Para girar a la DERECHA:
+      Motor izquierdo va ADELANTE
+      Motor derecho va ATRAS
+
+
+================================================================================
+7. src/main.cpp — EL PROGRAMA PRINCIPAL (PATRON CUADRADO)
+================================================================================
+
+PROPOSITO: Usar todas las funciones anteriores para hacer que el robot
+trace un cuadrado perfecto de forma autonoma.
+
+--------------------------------------------------------------------------------
+ESTRUCTURA BASICA DE UN PROGRAMA ARDUINO
+--------------------------------------------------------------------------------
+
+  Todo programa Arduino tiene DOS funciones obligatorias:
+
+  void setup():
+    Se ejecuta UNA SOLA VEZ al encender o resetear el ESP32.
+    Aqui inicializas hardware, configuras pines, conectas sensores.
+    Es como el "desayuno" del robot: lo preparas antes de trabajar.
+
+  void loop():
+    Se ejecuta CONTINUAMENTE en un bucle infinito despues de setup().
+    Arduino llama a loop() una y otra vez automaticamente.
+    Es el "trabajo" del robot.
+
+  En nuestro caso especial, loop() ejecuta el cuadrado y luego entra en
+  un while(true) infinito. Esto significa que el cuadrado se ejecuta
+  exactamente UNA VEZ. Para repetirlo, aprieta el boton de reset.
+
+--------------------------------------------------------------------------------
+LINEAS: #include <Arduino.h>
+        #include "config/config.h"
+        #include "motors.h"
+        #include "imu.h"
+        #include "movements.h"
+--------------------------------------------------------------------------------
+
+  #include importa otros archivos. Equivale a "copiar y pegar" ese archivo aqui.
+
+  <Arduino.h>: libreria principal de Arduino (con comillas angulares = sistema)
+  "config/config.h": nuestro archivo de configuracion (con comillas = proyecto)
+
+  El orden importa: config.h debe ir antes de los demas porque los otros
+  dependen de las constantes definidas ahi.
+
+--------------------------------------------------------------------------------
+LINEAS: #define LADOS_PATRON  4
+        #define ANGULO_GIRO   90.0f
+--------------------------------------------------------------------------------
+
+  Constantes locales solo para main.cpp.
+  Separadas de config.h porque son parametros del PATRON, no del hardware.
+  Si quisieras un triangulo: LADOS_PATRON=3, ANGULO_GIRO=120.0f
+
+--------------------------------------------------------------------------------
+FUNCION: void setup()
+--------------------------------------------------------------------------------
+
+  LINEA: Serial.begin(SERIAL_BAUD);
+    Inicializa la comunicacion serial a 115200 bits por segundo.
+    El Serial Monitor de PlatformIO debe estar en la misma velocidad.
+    Por esto SERIAL_BAUD = 115200 en config.h.
+
+  LINEA: delay(500);
+    Espera 500ms despues de iniciar el Serial. Sin esto, los primeros
+    mensajes pueden perderse porque la conexion no esta lista todavia.
+
+  LINEA: bool imuOK = initIMU();
+    Guarda el resultado de la inicializacion del IMU en una variable booleana
+    (true/false). Se usa para mostrarlo en el mensaje de inicio.
+
+  LINEA: Serial.printf("  Velocidad:  %d/255\n", VEL_AVANCE);
+    printf permite insertar variables en texto con formato.
+    %d = numero entero decimal
+    %f = numero float
+    %.1f = float con 1 decimal
+    %.0f = float sin decimales (redondeado)
+    \n = nueva linea (Enter)
+
+  LINEAS: for (int i = 3; i > 0; i--) {
+    Cuenta regresiva de 3 a 1.
+    "for" es un bucle con tres partes:
+      int i = 3      → valor inicial
+      i > 0          → condicion para continuar
+      i--            → que hacer al final de cada iteracion (i-- resta 1)
+
+--------------------------------------------------------------------------------
+FUNCION: void loop() — EL CUADRADO
+--------------------------------------------------------------------------------
+
+  LINEA: for (int lado = 1; lado <= LADOS_PATRON; lado++) {
+    Repite el bloque 4 veces (lado = 1, 2, 3, 4).
+    "lado++" suma 1 a lado al final de cada iteracion.
+
+  LINEA: avanzar(TIEMPO_LADO_MS);
+    Llama a la funcion del modulo movements.cpp.
+    El robot avanzara en linea recta durante TIEMPO_LADO_MS milisegundos,
+    corrigiendo la direccion con PID durante todo ese tiempo.
+
+  LINEA: delay(TIEMPO_PAUSA_MS);
+    Pausa entre movimientos. El robot necesita estabilizarse antes del
+    siguiente movimiento para que el IMU no tenga lecturas erroneas.
+
+  LINEAS: if (lado < LADOS_PATRON) {
+            girar(ANGULO_GIRO);
+          }
+
+    Despues del ULTIMO lado, NO giramos. Solo giramos entre lados.
+    4 lados y 3 giros: 1→giro→2→giro→3→giro→4→FIN
+
+  LINEA: while (true) { delay(1000); }
+    Bucle infinito que no hace nada. El robot se queda parado.
+    "true" siempre es verdadero, asi que nunca sale del while.
+    delay(1000) espera 1 segundo para no sobrecargar el procesador.
+    Para repetir el cuadrado: presiona el boton RESET del ESP32.
+
+
+================================================================================
+8. platformio.ini — LA CONFIGURACION DEL PROYECTO
+================================================================================
+
+  Este archivo le dice a PlatformIO como compilar y subir el codigo.
+
+  [env:esp32dev]
+    Define un "entorno" de compilacion llamado "esp32dev".
+    Podrias tener multiples entornos (ej: uno para ESP32, otro para Arduino Nano).
+
+  platform = espressif32
+    La plataforma de hardware. "espressif32" es el fabricante del ESP32.
+
+  board = esp32dev
+    El modelo exacto de placa. "esp32dev" es la placa de desarrollo ESP32
+    estandar. PlatformIO usa esto para saber los pines disponibles, memoria, etc.
+
+  framework = arduino
+    Usamos el framework de Arduino (funciones como pinMode, digitalWrite, millis).
+    Alternativas: "espidf" (el framework nativo de Espressif, mas complejo).
+
+  monitor_speed = 115200
+    Velocidad del Serial Monitor. Debe coincidir con Serial.begin(115200).
+
+  upload_speed = 921600
+    Velocidad para subir el firmware al ESP32. Mas rapido = menos tiempo de espera.
+
+  lib_deps = ...
+    Lista de librerias externas a descargar e instalar automaticamente.
+    PlatformIO las descarga de internet la primera vez.
+
+
+================================================================================
+9. GLOSARIO DE SINTAXIS C++
+================================================================================
+
+  TIPOS DE DATOS:
+    int          = numero entero, -2,147,483,648 a 2,147,483,647
+    unsigned int = entero sin signo, 0 a 4,294,967,295
+    unsigned long = entero sin signo grande, 0 a 4,294,967,295 (igual que uint)
+    float        = numero decimal, precision ~7 digitos, rango ±3.4×10³⁸
+    bool         = verdadero (true=1) o falso (false=0)
+    void         = "nada" — para funciones que no devuelven valor
+
+  OPERADORES:
+    +  -  *  /   = suma, resta, multiplicacion, division
+    %            = modulo (resto de la division: 7%3 = 1)
+    ==           = igualdad (compara, no asigna)
+    !=           = diferente
+    <  >  <=  >= = comparaciones
+    &&           = AND logico (ambos deben ser true)
+    ||           = OR logico (al menos uno debe ser true)
+    !            = NOT logico (invierte true/false)
+    ++           = incremento (i++ es i = i + 1)
+    --           = decremento (i-- es i = i - 1)
+    +=           = suma y asigna (x += 5 es x = x + 5)
+
+  CONTROL DE FLUJO:
+    if (cond) {}           = ejecuta si cond es true
+    if (cond) {} else {}   = if-else
+    while (cond) {}        = repite mientras cond es true
+    for (init; cond; step) = bucle con contador
+    break                  = sale del bucle actual
+    return valor           = termina la funcion y devuelve valor
+    return                 = termina la funcion (si es void)
+
+  PREFIJOS ESPECIALES:
+    static  = variable que persiste entre llamadas / visible solo en su archivo
+    extern  = variable definida en otro archivo
+    const   = valor que no puede cambiar (mas eficiente que #define para objetos)
+    &       = (en funciones) pasa por referencia (la funcion puede modificar el original)
+    *       = puntero (direccion de memoria)
+
+  FUNCIONES DE ARDUINO:
+    pinMode(pin, MODO)     = configura pin como INPUT u OUTPUT
+    digitalWrite(pin, val) = escribe HIGH (3.3V) o LOW (0V) en un pin
+    digitalRead(pin)       = lee HIGH o LOW de un pin
+    analogWrite(pin, val)  = PWM basico (Arduino, no ESP32)
+    ledcSetup(ch, freq, res) = configura PWM en ESP32
+    ledcAttachPin(pin, ch)   = conecta pin a canal PWM
+    ledcWrite(ch, val)       = escribe valor PWM
+    millis()               = milisegundos desde que encendio el microcontrolador
+    delay(ms)              = pausa el programa X milisegundos
+    Serial.begin(baud)     = inicia comunicacion serial
+    Serial.println(texto)  = imprime texto + nueva linea
+    Serial.printf(fmt, ..) = imprime texto con formato
+    constrain(val, min, max) = limita val entre min y max
+    abs(val)               = valor absoluto (sin signo)
+    PI                     = 3.14159... (constante de Arduino)
+
+
+================================================================================
+10. COMO AJUSTAR EL ROBOT EN CAMPO (TUNING)
+================================================================================
+
+PASO 1: PROBAR SIN PID
+  Primero deshabilita el PID (cambia imuDisponible a false temporalmente).
+  Ajusta VEL_AVANCE y TIEMPO_LADO_MS hasta que el robot avance la distancia
+  correcta. Esto establece tu linea base.
+
+PASO 2: AJUSTAR KP DEL PID DE DIRECCION (PID_DIR_KP)
+  Activa el PID. Empieza con KI=0 y KD=0 para aislar el efecto de KP.
+  - Si el robot oscila de lado a lado como un culebra: BAJA KP
+  - Si el robot no corrige y sigue desviandose: SUBE KP
+  - Busca el KP mas alto donde el robot va razonablemente recto sin oscilar
+
+PASO 3: AJUSTAR KD DEL PID DE DIRECCION (PID_DIR_KD)
+  Con el KP encontrado, agrega KD para suavizar las oscilaciones.
+  - Si el robot todavia oscila un poco: SUBE KD
+  - Si el robot reacciona lento o se vuelve inestable: BAJA KD
+  - KD tipicamente es 30-50% del valor de KP
+
+PASO 4: AJUSTAR KI (si hay desvio residual)
+  Si con solo KP y KD el robot llega al final del recorrido con un angulo
+  diferente a cero (siempre se desvio un poco en la misma direccion):
+  - SUBE KI muy lentamente (es muy sensible)
+  - Si el robot empieza a oscilar lentamente: BAJA KI
+
+PASO 5: REPETIR PARA EL PID DE GIRO
+  El mismo proceso para PID_GIRO_KP, KD, KI.
+  Observa si el robot se pasa del angulo objetivo (overshoot) o queda corto.
+
+VALORES DE REFERENCIA INICIALES PARA ESTE ROBOT:
+  PID_DIR_KP  = 2.5  (ajustar entre 1.0 y 5.0)
+  PID_DIR_KI  = 0.05 (ajustar entre 0.0 y 0.2)
+  PID_DIR_KD  = 1.2  (ajustar entre 0.5 y 3.0)
+  PID_GIRO_KP = 4.0  (ajustar entre 2.0 y 8.0)
+  PID_GIRO_KD = 1.5  (ajustar entre 0.5 y 4.0)
+
+HERRAMIENTA UTIL: el Serial Monitor
+  El codigo imprime datos en tiempo real:
+    [AVANZAR] t=500ms  ang=2.3°  err=-2.3°  corr=5.7  L=154  R=166
+  Esto te dice exactamente que esta haciendo el PID en cada momento.
+
+================================================================================
+FIN DEL DOCUMENTO
+WRO 2026 - Mosaic Masters - Rodrigo
+================================================================================

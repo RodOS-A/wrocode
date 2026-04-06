@@ -24,6 +24,12 @@
 //    girar(-45.0f);       // gira 45° a la derecha
 // ================================================================
 
+// Avanza por tiempo (ms). Usa si no tienes encoders calibrados.
 void avanzar(int ms);
+
+// Avanza exactamente 'pulsos' pulsos de encoder con PID de direccion.
+// Mas preciso que avanzar(ms). Calibra ENCODER_PPR en config.h primero.
+void avanzarPulsos(int pulsos);
+
 void retroceder(int ms);
 void girar(float grados);

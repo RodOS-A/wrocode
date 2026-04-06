@@ -100,6 +100,28 @@
 #define GIRO_TIMEOUT_MS   4000    // Tiempo maximo para completar un giro
 
 // ────────────────────────────────────────────────────────────────
+//  PINES — Encoders Hall (motores de traccion)
+//
+//  Pinout del conector JST de 6 cables del motor:
+//    M1  = Blanco → AO1/BO1 del TB6612FNG
+//    M2  = Rojo   → AO2/BO2 del TB6612FNG
+//    VCC = Negro  → 3.3V ESP32
+//    GND = Azul   → GND comun
+//    C1  = Verde  → Canal A del encoder (estas GPIOs abajo)
+//    C2  = Amarillo → Canal B del encoder (estas GPIOs abajo)
+// ────────────────────────────────────────────────────────────────
+#define PIN_ENC_L_A   32   // Encoder izq — C1 (verde)   → GPIO 32
+#define PIN_ENC_L_B   33   // Encoder izq — C2 (amarillo)→ GPIO 33
+#define PIN_ENC_R_A   27   // Encoder der — C1 (verde)   → GPIO 27
+#define PIN_ENC_R_B   14   // Encoder der — C2 (amarillo)→ GPIO 14
+
+// Pulsos por revolucion del encoder Hall
+// El motor N20 con encoder Hall tipicamente tiene 7 pulsos/rev en el eje del motor.
+// Despues de la caja reductora, los pulsos reales dependen de la relacion de reduccion.
+// CALIBRAR: haz girar la rueda 1 vuelta completa a mano, cuenta los pulsos en serial.
+#define ENCODER_PPR   7
+
+// ────────────────────────────────────────────────────────────────
 //  SERIAL
 // ────────────────────────────────────────────────────────────────
 #define SERIAL_BAUD   115200

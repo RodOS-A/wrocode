@@ -3,6 +3,7 @@
 #include "pid.h"
 #include "motors.h"
 #include "imu.h"
+#include "encoder.h"
 #include <Arduino.h>
 
 // ================================================================
@@ -64,6 +65,56 @@ void avanzar(int ms) {
   }
 
   motorsStop();
+}
+
+// ================================================================
+//  avanzarPulsos(pulsos)
+//
+//  Avanza hasta acumular 'pulsos' pulsos en el promedio de ambos
+//  encoders. Mantiene el PID de direccion activo igual que avanzar().
+//
+//  Ventaja vs avanzar(ms):
+//    - No depende del tiempo → no le afecta la bateria baja
+//    - Misma distancia aunque la velocidad cambie
+//    - Mas repetible en competencia
+//
+//  Como calibrar ENCODER_PPR:
+//    1. Llama resetEncoders()
+//    2. Empuja el robot exactamente 10cm a mano
+//    3. Lee encoderPrint() → ese numero es tus pulsos por 10cm
+//    4. Ajusta ENCODER_PPR en config.h segun corresponda
+// ================================================================
+void avanzarPulsos(int pulsos) {
+  ControladorPID pidDir(PID_DIR_KP, PID_DIR_KI, PID_DIR_KD,
+                        -PID_DIR_MAX, PID_DIR_MAX);
+  pidDir.resetear();
+  resetEncoders();
+
+  float anguloReferencia = angulo;
+
+  Serial.printf("[AVANZAR] objetivo: %d pulsos\n", pulsos);
+
+  while (abs(getEncAvg()) < pulsos) {
+    actualizarAngulo();
+
+    float correccion = pidDir.calcular(anguloReferencia, angulo);
+    int velL = constrain((int)(VEL_AVANCE - correccion), VEL_MINIMA, 255);
+    int velR = constrain((int)(VEL_AVANCE + correccion), VEL_MINIMA, 255);
+    motorAmbos(velL, velR, true);
+
+    static unsigned long tDebug = 0;
+    if (millis() - tDebug > 250) {
+      tDebug = millis();
+      Serial.printf("[AVANZAR] pulsos=%ld/%d  ang=%.1f°  corr=%.1f  L=%d R=%d\n",
+                    getEncAvg(), pulsos, angulo, correccion, velL, velR);
+    }
+
+    delay(5);
+  }
+
+  motorsStop();
+  Serial.printf("[AVANZAR] OK — pulsos finales: izq=%ld der=%ld\n",
+                getEncLeft(), getEncRight());
 }
 
 // ================================================================
